@@ -1,0 +1,189 @@
+services:
+
+  # ── Database ─────────────────────────────────────────────────
+  demo-postgres:
+    image: postgres:16-alpine
+    container_name: kubix-demo-postgres
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.max=10000
+      -c track_activity_query_size=2048
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-ecommerce_demo}
+      POSTGRES_USER:     ${DB_USER:-kubix}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kubix_demo_2024}
+    volumes:
+      - demo-postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kubix} -d ${DB_NAME:-ecommerce_demo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kubix-demo
+
+  # ── Kubix Services ───────────────────────────────────────────
+  kubix-schema:
+    build:
+      context: ../kubix-schema
+    container_name: kubix-demo-schema
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST:           demo-postgres
+      DB_PORT:           5432
+      DB_NAME:           ${DB_NAME:-ecommerce_demo}
+      DB_USER:           ${DB_USER:-kubix}
+      DB_PASSWORD:       ${DB_PASSWORD:-kubix_demo_2024}
+      DB_SSL_MODE:       disable
+      MIGRATION_TOOL:    flyway
+      SERVER_PORT:       8080
+    volumes:
+      - kubix-schema-snapshots:/app/snapshots
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kubix-demo
+
+  kubix-catalog:
+    build:
+      context: ../kubix-catalog
+    container_name: kubix-demo-catalog
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      DB_HOST:                demo-postgres
+      DB_PORT:                5432
+      DB_NAME:                ${DB_NAME:-ecommerce_demo}
+      DB_USER:                ${DB_USER:-kubix}
+      DB_PASSWORD:            ${DB_PASSWORD:-kubix_demo_2024}
+      DB_SSL_MODE:            disable
+      SERVER_PORT:            8082
+      SPEC_FETCH_TIMEOUT_SEC: 10
+      MAX_SPEC_SIZE_MB:       10
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kubix-demo
+
+  kubix-dbperf:
+    build:
+      context: ../kubix-dbperf
+    container_name: kubix-demo-dbperf
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      DB_HOST:                 demo-postgres
+      DB_PORT:                 5432
+      DB_NAME:                 ${DB_NAME:-ecommerce_demo}
+      DB_USER:                 ${DB_USER:-kubix}
+      DB_PASSWORD:             ${DB_PASSWORD:-kubix_demo_2024}
+      DB_SSL_MODE:             disable
+      SERVER_PORT:             8081
+      SLOW_QUERY_THRESHOLD_MS: 50
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kubix-demo
+
+  kubix-migration-tool:
+    build:
+      context: ../kubix-migration-tool
+    container_name: kubix-demo-migration
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      DB_HOST:     demo-postgres
+      DB_PORT:     5432
+      DB_NAME:     ${DB_NAME:-ecommerce_demo}
+      DB_USER:     ${DB_USER:-kubix}
+      DB_PASSWORD: ${DB_PASSWORD:-kubix_demo_2024}
+      DB_SSL_MODE: disable
+      SERVER_PORT: 8083
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kubix-demo
+
+  kubix-dashboard:
+    build:
+      context: ../kubix-dashboard
+    container_name: kubix-demo-dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      kubix-schema:
+        condition: service_healthy
+      kubix-catalog:
+        condition: service_healthy
+      kubix-dbperf:
+        condition: service_healthy
+      kubix-migration-tool:
+        condition: service_healthy
+    networks:
+      - kubix-demo
+
+  # ── Demo Seed (runs once, registers all services) ────────────
+  demo-seed:
+    build:
+      context: ./seed
+    container_name: kubix-demo-seed
+    environment:
+      CATALOG_URL:  http://kubix-demo-catalog:8082
+      SCHEMA_URL:   http://kubix-demo-schema:8080
+      PGHOST:       demo-postgres
+      PGPORT:       5432
+      PGDATABASE:   ${DB_NAME:-ecommerce_demo}
+      PGUSER:       ${DB_USER:-kubix}
+      PGPASSWORD:   ${DB_PASSWORD:-kubix_demo_2024}
+    depends_on:
+      kubix-schema:
+        condition: service_healthy
+      kubix-catalog:
+        condition: service_healthy
+    networks:
+      - kubix-demo
+    restart: "no"
+
+networks:
+  kubix-demo:
+    driver: bridge
+
+volumes:
+  demo-postgres-data:
+  kubix-schema-snapshots:
